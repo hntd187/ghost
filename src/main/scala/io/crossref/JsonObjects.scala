@@ -6,7 +6,9 @@ object JsonObjects {
 
   case class ContentDomain(domain: Seq[String], crossmarkRestriction: Boolean)
 
-  case class Authors(given: Option[String], family: Option[String], affiliation: Seq[String])
+  case class Affiliation(name: String)
+
+  case class Authors(given: Option[String], family: Option[String], affiliation: Seq[Affiliation])
 
   case class PublishedOnline(dateParts: DateParts)
 

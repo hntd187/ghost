@@ -2,15 +2,15 @@ package io.crossref
 
 import java.io.RandomAccessFile
 import java.nio.channels.FileChannel
-import scala.collection.mutable.HashMap
+
+import scala.collection.mutable
 import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.duration._
 
 import dispatch._
+import org.asynchttpclient.{Response => Resp}
 import org.json4s._
-import scribe._
 import org.json4s.jackson.Serialization._
-import org.json4s.DefaultFormats
+import scribe._
 
 class CrossRef(private val contact: Option[String] = None) extends AutoCloseable {
 
@@ -18,17 +18,22 @@ class CrossRef(private val contact: Option[String] = None) extends AutoCloseable
 
   def this(contact: String) = this(Some(contact))
 
-  implicit val formats = DefaultFormats
+  private implicit val formats: DefaultFormats.type = DefaultFormats
 
-  private val params = HashMap.empty[String, String]
-  contact.foreach(c => params += ("mailto" -> c))
-
-  private val client = Http.withConfiguration { b =>
+  var part                        = 0
+  private var numReqs: Int        = 0
+  private var averageTime: Double = 0.0
+  private var averageSize: Double = 0.0
+  private val client: Http = Http.withConfiguration { b =>
     b.setRequestTimeout(36000)
       .setCompressionEnforced(true)
       .setMaxConnectionsPerHost(10)
       .setMaxConnections(100)
   }
+
+  private val recordBuffer = mutable.Queue.empty[Publication]
+  private val cursorBuffer = mutable.Queue.empty[String]
+  var prevCursor           = ""
 
   private def convertFields: PartialFunction[JField, JField] = {
     case ("message-type", x)           => ("messageType", x)
@@ -52,25 +57,49 @@ class CrossRef(private val contact: Option[String] = None) extends AutoCloseable
     case ("next-cursor", x)            => ("nextCursor", x)
   }
 
-  private var averageTime: Double = 0.0
-  private var averageSize: Double = 0.0
-
-  import org.asynchttpclient.{Response => Resp}
-
   private def parseResponse(r: Resp, startTime: Long): JValue = {
-    val endTime = Duration(System.currentTimeMillis() - startTime, MILLISECONDS).toSeconds
-    info(s"Request took: $endTime seconds")
-    info(s"Content Length: ${r.getHeader("content-length")}")
+    val endTime = System.currentTimeMillis() - startTime
+    numReqs += 1
+    averageTime += endTime
+    averageSize += r.getHeader("content-length").toDouble
+    //info(s"Response Time: $endTime, Response Size: ${r.getHeader("content-length")}")
     as.json4s.Json(r)
   }
 
-  def base(): Response[Items] = {
-    val req = contact.map(c => works <<? Map("mailto" -> c)).getOrElse(works)
-    info(s"URL: ${req.url}")
-    val startTime = System.currentTimeMillis()
-    val resp      = client(req OK (r => parseResponse(r, startTime)))
+  def base(): Unit = {
+    val req = contact.map(c => works <<? Map("mailto" -> c, "cursor" -> "*")).getOrElse(works)
+    //info(s"URL: ${req.url}")
+    request(req)
+  }
 
-    resp().transformField(convertFields).extract[Response[Items]]
+  def next(): Unit = {
+    if (prevCursor.isEmpty) return
+    //info(s"Average Response Time: ${averageTime / numReqs}, Average Response Size: ${averageSize / numReqs}")
+    val req = contact.map(c => works <<? Map("mailto" -> c, "cursor" -> prevCursor)).getOrElse(works)
+    request(req)
+  }
+
+  def request(r: Req): Unit = {
+    val startTime = System.currentTimeMillis()
+    val resp      = client(r OK (r => parseResponse(r, startTime)))
+    val items     = resp().transformField(convertFields).extract[Response[Items]]
+    recordBuffer ++= items.message.items
+    cursorBuffer ++= items.message.nextCursor
+    prevCursor = items.message.nextCursor.getOrElse("")
+  }
+
+  def writeFile(): Unit = {
+    import org.xerial.snappy.Snappy
+
+    val bytes       = Snappy.compress(write(recordBuffer).getBytes())
+    val cursorBytes = cursorBuffer.mkString("\n").getBytes()
+    val raf         = new RandomAccessFile(s"part-$part.json.snappy", "rw").getChannel
+    val cursors     = new RandomAccessFile(s"part-$part-cursors.txt", "rw").getChannel
+
+    raf.map(FileChannel.MapMode.READ_WRITE, 0, bytes.length).put(bytes)
+    cursors.map(FileChannel.MapMode.READ_WRITE, 0, cursorBytes.length).put(cursorBytes)
+    raf.close()
+    cursors.close()
   }
 
   def close(): Unit = client.shutdown()
@@ -82,26 +111,17 @@ object CrossRef {
 }
 
 object CR extends App {
-  def time[R](block: => R): R = {
-    val startTime = System.currentTimeMillis()
-    val r         = block
-    val endTime   = Duration(System.currentTimeMillis() - startTime, MILLISECONDS).toMillis
-    println(s"Execution took: $endTime milliseconds")
-    r
-  }
+
   implicit val formats = DefaultFormats
 
-  val r    = CrossRef("shcarman@gmail.com")
-  val recs = r.base()
+  val r = CrossRef("shcarman@gmail.com")
+  r.base()
 
-  info(s"Items: ${recs.message.items.length}")
-  info(s"Cursor: ${recs.message.nextCursor.get}")
-
-  val bytes = write(recs.message.items).getBytes()
-  time {
-    val raf = new RandomAccessFile("example.json", "rw").getChannel
-    raf.map(FileChannel.MapMode.READ_WRITE, 0, bytes.length).put(bytes)
-    raf.close()
+  for (i <- 1 to 50) {
+    info(s"--> ($i / 50)...")
+    r.next()
   }
+  r.writeFile()
+
   r.close()
 }
