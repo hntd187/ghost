@@ -1,5 +1,14 @@
 package io.crossref
 
+import java.nio.file.{Files, Paths}
+import java.util.concurrent.{ConcurrentLinkedQueue, Executors}
+
+import scala.concurrent.duration.Duration
+import scala.concurrent.{Await, ExecutionContext}
+
+import com.github.plokhotnyuk.jsoniter_scala.core._
+import com.github.plokhotnyuk.jsoniter_scala.macros._
+import dispatch._
 import scopt._
 import scribe._
 
@@ -27,7 +36,7 @@ object CR extends App {
   val r = CrossRef(options)
   r.base()
 
-  val batchSize = 100
+  val batchSize = 20
   val batches   = 10
   for (x <- 1 to batches) {
     for (i <- 1 to batchSize) {
@@ -37,4 +46,40 @@ object CR extends App {
     r.writeFile()
   }
   r.close()
+
+}
+
+import scala.collection.JavaConverters._
+import scala.collection.Seq
+
+object Testing extends App {
+
+  implicit val enc: JsonValueCodec[ItemResponse] = JsonCodecMaker.make[ItemResponse](CodecMakerConfig())
+  val pubEnc: JsonValueCodec[Seq[Publication]]   = JsonCodecMaker.make[Seq[Publication]](CodecMakerConfig())
+
+  val records       = new ConcurrentLinkedQueue[Publication]()
+  val futures       = Seq.empty[Future[Seq[Publication]]]
+  val threadPool    = Executors.newFixedThreadPool(8)
+  implicit val pool = ExecutionContext.fromExecutor(threadPool)
+
+  val file = Files.readAllLines(Paths.get("/Users/steve_carman/Desktop/crossref/part-0-cursors.txt")).asScala.toList
+  val u    = url("https://api.crossref.org/works")
+
+  println(s"Keys: ${file.length}")
+
+  val req = file.map { l =>
+    Thread.sleep(100)
+    val params = Map("mailto" -> "shcarman%40gmail.com", "rows" -> "1000", "cursor" -> l)
+    Http.default(u <<? params OK as.IterJson[ItemResponse]).map(r => r.message.items)
+  }
+
+  val fs = Future.foldLeft(req)(Seq.empty[Publication])(_ ++ _)
+
+  val result = Await.result(fs, Duration.Inf)
+
+  println(result.length)
+  val wo = WriterConfig(2, false, 32768)
+
+  Files.write(Paths.get("test.json"), writeToArray(result, wo)(pubEnc))
+  println("Done...")
 }

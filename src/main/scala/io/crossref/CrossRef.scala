@@ -19,8 +19,6 @@ import scribe._
 
 class CrossRef(private val config: Config) extends AutoCloseable {
 
-  import JsonObjects._
-
   private implicit val formats: DefaultFormats.type = DefaultFormats
   private val encoding: Charset                     = StandardCharsets.UTF_8
 
@@ -30,9 +28,9 @@ class CrossRef(private val config: Config) extends AutoCloseable {
   private var averageSize: Double               = 0.0
   private var prevCursor: String                = ""
   private var writeHandle: Option[Future[Unit]] = None
+  private var recordBuffer: Queue[Publication]  = Queue.empty[Publication]
+  private var cursorBuffer: Queue[String]       = Queue.empty[String]
 
-  private val recordBuffer: Queue[Publication] = Queue.empty[Publication]
-  private val cursorBuffer: Queue[String]      = Queue.empty[String]
   private val client: Http = Http.withConfiguration { b =>
     b.setRequestTimeout(36000)
       .setCompressionEnforced(true)
@@ -73,7 +71,7 @@ class CrossRef(private val config: Config) extends AutoCloseable {
     numReqs += 1
     averageTime += endTime
     averageSize += r.getHeader("content-length").toDouble
-    as.json4s.Json(r)
+    dispatch.as.json4s.Json(r)
   }
 
   def base(): Unit = {
@@ -109,20 +107,22 @@ class CrossRef(private val config: Config) extends AutoCloseable {
     val items     = resp().transformField(convertFields).extract[Response[Items]]
     if (update) {
       recordBuffer ++= items.message.items
-      cursorBuffer ++= items.message.nextCursor
+      cursorBuffer ++= items.message.`next-cursor`
     }
-    prevCursor = items.message.nextCursor.getOrElse("")
+    prevCursor = items.message.`next-cursor`.getOrElse("")
   }
 
   def writeFile(): Unit = {
-    val recCopy     = recordBuffer.clone()
-    val curCopy     = cursorBuffer.clone()
-    val lastCurCopy = prevCursor
-    val atPart      = part
+    val atPart = part
+    val prev   = prevCursor
+    val write  = Future(writeFile(recordBuffer, cursorBuffer, prev))
+
     recordBuffer.clear()
     cursorBuffer.clear()
 
-    val write = Future(writeFile(recCopy, curCopy, lastCurCopy))
+    recordBuffer = Queue.empty[Publication]
+    cursorBuffer = Queue.empty[String]
+
     write.onComplete {
       case Success(_) => info(s"Wrote Part $atPart..."); writeHandle = None
       case Failure(e) => throw e
