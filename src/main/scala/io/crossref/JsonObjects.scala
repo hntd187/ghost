@@ -24,7 +24,7 @@ case class Relation(`id-type`: String, id: String, `asserted-by`: String)
 
 case class ClinicalTrialNumber(`clinical-trial-number`: String, registry: String, `type`: Option[String])
 
-case class Contributor(family: String,
+case class Contributor(family: Option[String],
                        given: Option[String],
                        ORCID: Option[String],
                        `authenticated-orcid`: Option[Boolean],
@@ -32,10 +32,12 @@ case class Contributor(family: String,
 
 case class Update(updated: PartialDate, DOI: String, `type`: String, label: Option[String])
 
+case class ExplanationURL(URL: String)
+
 case class Assertion(name: String,
-                     value: String,
+                     value: Option[String],
                      URL: Option[String],
-                     explanation: Option[String],
+                     explanation: Option[ExplanationURL],
                      label: Option[String],
                      order: Option[Int],
                      group: Option[AssertionGroup])
@@ -50,7 +52,7 @@ case class Funder(name: String, DOI: Option[String], award: Seq[String], `doi-as
 
 case class JournalIssue(issue: String)
 
-case class Reference(key: String,
+case class Reference(key: Option[String],
                      author: Option[String],
                      issue: Option[String],
                      edition: Option[String],
@@ -79,12 +81,12 @@ case class Publication(publisher: String,
                        `short-title`: Seq[String],
                        `abstract`: Option[String],
                        `is-referenced-by-count`: Int,
-                       source: String,
-                       prefix: String,
-                       DOI: String,
-                       URL: String,
-                       member: String,
-                       `type`: String,
+                       source: Option[String],
+                       prefix: Option[String],
+                       DOI: Option[String],
+                       URL: Option[String],
+                       member: Option[String],
+                       `type`: Option[String],
                        created: DateParts,
                        deposited: DateParts,
                        indexed: DateParts,

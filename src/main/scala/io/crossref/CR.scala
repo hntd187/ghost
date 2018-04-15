@@ -1,14 +1,17 @@
 package io.crossref
 
-import java.nio.file.{Files, Paths}
-import java.util.concurrent.{ConcurrentLinkedQueue, Executors}
-
+import java.io._
+import java.nio.file._
+import scala.collection.JavaConverters._
+import scala.collection.immutable
+import scala.concurrent.Await
+import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, ExecutionContext}
 
 import com.github.plokhotnyuk.jsoniter_scala.core._
 import com.github.plokhotnyuk.jsoniter_scala.macros._
 import dispatch._
+import org.xerial.snappy.SnappyHadoopCompatibleOutputStream
 import scopt._
 import scribe._
 
@@ -21,10 +24,10 @@ object CR extends App {
     override def errorOnUnknownArgument: Boolean = true
     override def showUsageOnError: Boolean       = true
 
-    opt[String]('o', "output").optional().action((v, c) => c.copy(outputDir = v))
-    opt[Unit]('r', "resume").optional().action((_, c) => c.copy(resume = true))
+    opt[String]('o', "output").optional().action((v, c) => c.copy(outputDir         = v))
+    opt[Unit]('r', "resume").optional().action((_, c) => c.copy(resume              = true))
     opt[Unit]('n', "no-compression").optional().action((_, c) => c.copy(compression = false))
-    opt[String]('c', "contact").required().action((v, c) => c.copy(contact = v))
+    opt[String]('c', "contact").required().action((v, c) => c.copy(contact          = v))
     help("help").text("Displays Help Text")
   }
 
@@ -49,37 +52,73 @@ object CR extends App {
 
 }
 
-import scala.collection.JavaConverters._
-import scala.collection.Seq
-
 object Testing extends App {
 
   implicit val enc: JsonValueCodec[ItemResponse] = JsonCodecMaker.make[ItemResponse](CodecMakerConfig())
   val pubEnc: JsonValueCodec[Seq[Publication]]   = JsonCodecMaker.make[Seq[Publication]](CodecMakerConfig())
+  val singlePubEnc: JsonValueCodec[Publication]  = JsonCodecMaker.make[Publication](CodecMakerConfig())
 
-  val records       = new ConcurrentLinkedQueue[Publication]()
-  val futures       = Seq.empty[Future[Seq[Publication]]]
-  val threadPool    = Executors.newFixedThreadPool(8)
-  implicit val pool = ExecutionContext.fromExecutor(threadPool)
-
-  val file = Files.readAllLines(Paths.get("/Users/steve_carman/Desktop/crossref/part-0-cursors.txt")).asScala.toList
-  val u    = url("https://api.crossref.org/works")
-
-  println(s"Keys: ${file.length}")
-
-  val req = file.map { l =>
-    Thread.sleep(100)
-    val params = Map("mailto" -> "shcarman%40gmail.com", "rows" -> "1000", "cursor" -> l)
-    Http.default(u <<? params OK as.IterJson[ItemResponse]).map(r => r.message.items)
+  val futures: Seq[Future[Seq[Publication]]] = Seq.empty
+  val base_url: Req                          = url("https://api.crossref.org/works")
+  val wo: WriterConfig                       = WriterConfig(0, false, 32768)
+  val client: Http = Http.withConfiguration { c =>
+    c.setUseNativeTransport(false)
+    c.setCompressionEnforced(true)
+    c.setMaxConnections(500)
+    c.setMaxConnectionsPerHost(200)
+    c.setPooledConnectionIdleTimeout(100)
+    c.setConnectionTtl(100)
+    c.setIoThreadsCount(24)
   }
 
-  val fs = Future.foldLeft(req)(Seq.empty[Publication])(_ ++ _)
+  val cursorDir = Paths.get("cursors")
+  val pm        = FileSystems.getDefault.getPathMatcher("glob:**/*.txt")
+  val files = Files
+    .list(cursorDir)
+    .filter(p => pm.matches(p))
+    .iterator()
+    .asScala
+    .toSeq
+  val total = files.length
 
-  val result = Await.result(fs, Duration.Inf)
+  println(total)
+  files.take(10).zipWithIndex.foreach {
+    case (p, i) =>
+      val file   = readLines(p)
+      val tokens = p.getFileName.toString.split("-").slice(0, 2).mkString("-")
+      val output = s"cursors\\$tokens.json.snappy"
+      collectCursors(output, file)
+      val pct = ((i.toDouble + 1.0) / total.toDouble) * 100.0
+      info(f"Finished (${i + 1}/$total) ($pct%3.2f%%)")
+  }
 
-  println(result.length)
-  val wo = WriterConfig(2, false, 32768)
+  if (!client.client.isClosed) {
+    client.client.close()
+    client.shutdown()
+  }
 
-  Files.write(Paths.get("test.json"), writeToArray(result, wo)(pubEnc))
-  println("Done...")
+  @inline
+  def writeJson(pubs: Seq[Publication], output: String): Unit = {
+    val hos = new SnappyHadoopCompatibleOutputStream(new FileOutputStream(new File(output)))
+    pubs.foreach { p =>
+      writeToStream(p, hos, wo)(singlePubEnc)
+      hos.write(Array[Byte]('\n'))
+    }
+    hos.close()
+  }
+
+  def collectCursors(output: String, cursors: immutable.Seq[String]): Unit = {
+    val req = cursors.map { l =>
+      Thread.sleep(100)
+      val params = Map("mailto" -> "shcarman%40gmail.com", "rows" -> "1000", "cursor" -> l)
+      client(base_url <<? params OK as.IterJson[ItemResponse])
+        .map(r => r.message.items)
+    }
+    val fs     = Future.foldLeft(req)(Seq.empty[Publication])(_ ++ _)
+    val result = Await.result(fs, Duration.Inf)
+    Future(writeJson(result, output))
+  }
+
+  @inline
+  def readLines(p: Path): immutable.Seq[String] = Files.readAllLines(p).asScala.toList
 }
