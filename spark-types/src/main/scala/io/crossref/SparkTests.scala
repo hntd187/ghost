@@ -8,8 +8,12 @@ object SparkTests extends App {
 
   import spark.implicits._
 
-  val data = spark.read.json("cursors\\part-0.json").withColumnRenamed("abstract", "abs").as[Publication]
+  val filePath = ""
+  val data = spark.read
+    .json(filePath)
+    .withColumnRenamed("abstract", "abs") // Spark does not allow abstract to be a column name.
+    .as[Publication]
 
-  data.printSchema()
+  data.show()
 
 }
