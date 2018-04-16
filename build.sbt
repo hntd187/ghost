@@ -10,8 +10,8 @@ lazy val common = Seq(
 lazy val compileOpts = Seq(
   javaOptions ++= Seq(
     "-server",
-    "-Xms10g",
-    "-Xmx10g",
+    "-Xms5g",
+    "-Xmx5g",
     "-XX:+AlwaysPreTouch",
     "-XX:+UseG1GC"
   ),

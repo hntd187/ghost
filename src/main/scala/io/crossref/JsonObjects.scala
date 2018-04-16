@@ -34,7 +34,7 @@ case class Update(updated: PartialDate, DOI: String, `type`: String, label: Opti
 
 case class ExplanationURL(URL: String)
 
-case class Assertion(name: String,
+case class Assertion(name: Option[String],
                      value: Option[String],
                      URL: Option[String],
                      explanation: Option[ExplanationURL],
@@ -42,13 +42,13 @@ case class Assertion(name: String,
                      order: Option[Int],
                      group: Option[AssertionGroup])
 
-case class AssertionGroup(name: String, label: Option[String])
+case class AssertionGroup(name: Option[String], label: Option[String])
 
-case class License(`content-version`: String, `delay-in-days`: Int, start: DateParts, URL: String)
+case class License(`content-version`: String, `delay-in-days`: Int, start: Option[DateParts], URL: Option[String])
 
 case class ResourceLink(`intended-application`: String, `content-version`: String, URL: String, `content-type`: Option[String])
 
-case class Funder(name: String, DOI: Option[String], award: Seq[String], `doi-asserted-by`: Option[String])
+case class Funder(name: Option[String], DOI: Option[String], award: Seq[String], `doi-asserted-by`: Option[String])
 
 case class JournalIssue(issue: String)
 
@@ -75,7 +75,7 @@ case class Reference(key: Option[String],
                      DOI: Option[String],
                      `doi-asserted-by`: Option[String])
 
-case class Publication(publisher: String,
+case class Publication(publisher: Option[String],
                        title: Seq[String],
                        `original-title`: Seq[String],
                        `short-title`: Seq[String],

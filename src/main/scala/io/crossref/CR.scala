@@ -71,25 +71,26 @@ object Testing extends App {
     c.setIoThreadsCount(24)
   }
 
-  val cursorDir = Paths.get("cursors")
+  val base      = "/Users/steve_carman/Desktop"
+  val cursorDir = Paths.get(base, "crossref")
   val pm        = FileSystems.getDefault.getPathMatcher("glob:**/*.txt")
-  val files = Files
-    .list(cursorDir)
-    .filter(p => pm.matches(p))
-    .iterator()
-    .asScala
-    .toSeq
-  val total = files.length
+  val files     = Files.list(cursorDir).filter(p => pm.matches(p)).iterator().asScala.toSeq
+  val total     = files.length
+  val start = if (args.nonEmpty) {
+    args.head.toInt
+  } else {
+    0
+  }
 
-  println(total)
-  files.take(10).zipWithIndex.foreach {
+  files.slice(start, total - 1).zipWithIndex.foreach {
     case (p, i) =>
+      info(s"Starting: ${p.getFileName}")
       val file   = readLines(p)
       val tokens = p.getFileName.toString.split("-").slice(0, 2).mkString("-")
-      val output = s"cursors\\$tokens.json.snappy"
+      val output = s"$base/crossref2/$tokens.json.snappy"
       collectCursors(output, file)
-      val pct = ((i.toDouble + 1.0) / total.toDouble) * 100.0
-      info(f"Finished (${i + 1}/$total) ($pct%3.2f%%)")
+      val pct = ((i.toDouble + start) / total.toDouble) * 100.0
+      info(f"Finished: $output (${i + start}/$total) ($pct%3.2f%%)")
   }
 
   if (!client.client.isClosed) {
@@ -111,8 +112,7 @@ object Testing extends App {
     val req = cursors.map { l =>
       Thread.sleep(100)
       val params = Map("mailto" -> "shcarman%40gmail.com", "rows" -> "1000", "cursor" -> l)
-      client(base_url <<? params OK as.IterJson[ItemResponse])
-        .map(r => r.message.items)
+      client(base_url <<? params OK as.IterJson[ItemResponse]).map(r => r.message.items)
     }
     val fs     = Future.foldLeft(req)(Seq.empty[Publication])(_ ++ _)
     val result = Await.result(fs, Duration.Inf)
