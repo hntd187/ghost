@@ -5,23 +5,28 @@ import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.charset._
 import java.nio.file._
+
 import scala.collection.JavaConverters._
 import scala.collection.mutable.Queue
 import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration.Duration
+import scala.concurrent.{Await, Future}
 import scala.util._
 
-import dispatch._
-import org.asynchttpclient.{Response => Resp}
-import org.json4s._
-import org.json4s.jackson.Serialization._
+import com.softwaremill.sttp._
+import com.softwaremill.sttp.asynchttpclient.future.AsyncHttpClientFutureBackend
+import com.softwaremill.sttp.circe._
+import io.circe.Json
+import io.circe.generic.auto._
+import io.circe.syntax._
+import io.crossref.JsonObjects._
+import org.asynchttpclient.{DefaultAsyncHttpClientConfig, Response => Resp}
 import org.xerial.snappy.Snappy
 import scribe._
 
 class CrossRef(private val config: Config) extends AutoCloseable {
 
-  private implicit val formats: DefaultFormats.type = DefaultFormats
-  private val encoding: Charset                     = StandardCharsets.UTF_8
-
+  private val encoding: Charset                 = StandardCharsets.UTF_8
   private var part: Int                         = 0
   private var numReqs: Int                      = 0
   private var averageTime: Double               = 0.0
@@ -31,61 +36,41 @@ class CrossRef(private val config: Config) extends AutoCloseable {
   private var recordBuffer: Queue[Publication]  = Queue.empty[Publication]
   private var cursorBuffer: Queue[String]       = Queue.empty[String]
 
-  private val client: Http = Http.withConfiguration { b =>
-    b.setRequestTimeout(36000)
-      .setCompressionEnforced(true)
-      .setMaxConnectionsPerHost(10)
-      .setMaxConnections(100)
-  }
+  private val clientCfg = new DefaultAsyncHttpClientConfig.Builder()
+    .setRequestTimeout(36000)
+    .setCompressionEnforced(true)
+    .setMaxConnectionsPerHost(10)
+    .setMaxConnections(100)
+    .build()
 
-  private val outputDir = Paths.get(config.outputDir)
+  private implicit val client = AsyncHttpClientFutureBackend.usingConfig(clientCfg)
+  private val outputDir       = Paths.get(config.outputDir)
+
   if (Files.notExists(outputDir)) {
     info(s"Output Dir: $outputDir does not exist...creating...")
     Files.createDirectory(outputDir)
   }
 
-  private def convertFields: PartialFunction[JField, JField] = {
-    case ("message-type", x)           => ("messageType", x)
-    case ("message-version", x)        => ("messageVersion", x)
-    case ("date-parts", x)             => ("dateParts", x)
-    case ("date-time", x)              => ("dateTime", x)
-    case ("reference-count", x)        => ("referenceCount", x)
-    case ("content-domain", x)         => ("contentDomain", x)
-    case ("crossmark-restriction", x)  => ("crossmarkRestriction", x)
-    case ("is-referenced-by-count", x) => ("isReferencedByCount", x)
-    case ("published-online", x)       => ("publishedOnline", x)
-    case ("container-title", x)        => ("containerTitle", x)
-    case ("content-type", x)           => ("contentType", x)
-    case ("content-version", x)        => ("contentVersion", x)
-    case ("intended-application", x)   => ("intendedApplication", x)
-    case ("references-count", x)       => ("referencesCount", x)
-    case ("start-index", x)            => ("startIndex", x)
-    case ("search-terms", x)           => ("searchTerms", x)
-    case ("total-results", x)          => ("totalResults", x)
-    case ("items-per-page", x)         => ("itemsPerPage", x)
-    case ("next-cursor", x)            => ("nextCursor", x)
-  }
-
-  private def parseResponse(r: Resp, startTime: Long): JValue = {
+  private def parseResponse(r: Resp, startTime: Long): Json = {
     val endTime = System.currentTimeMillis() - startTime
     numReqs += 1
     averageTime += endTime
     averageSize += r.getHeader("content-length").toDouble
-    dispatch.as.json4s.Json(r)
+    io.circe.parser.parse(r.getResponseBody).right.getOrElse(Json.Null)
   }
 
   def base(): Unit = {
     if (config.resume) {
       resume()
     } else {
-      val req = works <<? Map("mailto" -> config.contact, "cursor" -> "*")
+      val req = uri"$works/?mailto=${config.contact}&cursor=*"
       request(req)
     }
   }
 
   def next(): Unit = {
     if (prevCursor.isEmpty) return
-    val req = works <<? Map("mailto" -> config.contact, "cursor" -> prevCursor)
+    val req = uri"$works/?mailto=${config.contact}&cursor=$prevCursor"
     request(req)
   }
 
@@ -97,14 +82,14 @@ class CrossRef(private val config: Config) extends AutoCloseable {
 
     val cursor = new String(Files.readAllBytes(checkpoint)).trim
     info(s"Resuming from cursor position: $cursor")
-    val req = works <<? Map("mailto" -> config.contact, "cursor" -> cursor)
+    val req = uri"$works/?mailto=${config.contact}&cursor=$cursor"
     request(req, update = false)
   }
 
-  def request(r: Req, update: Boolean = true): Unit = {
+  def request(r: Uri, update: Boolean = true): Unit = {
     val startTime = System.currentTimeMillis()
-    val resp      = client(r OK (r => parseResponse(r, startTime)))
-    val items     = resp().transformField(convertFields).extract[Response[Items]]
+    val resp      = sttp.get(r).response(asJson[ItemResponse]).send()
+    val items     = Await.result(resp, Duration.Inf).unsafeBody.right.get
     if (update) {
       recordBuffer ++= items.message.items
       cursorBuffer ++= items.message.`next-cursor`
@@ -152,9 +137,9 @@ class CrossRef(private val config: Config) extends AutoCloseable {
 
   private def writeFile(records: Queue[Publication], cursors: Queue[String], checkpoint: String): Unit = {
     val bytes: Array[Byte] = if (config.compression) {
-      Snappy.compress(write(records).getBytes(encoding))
+      Snappy.compress(records.asJson.noSpaces.getBytes(encoding))
     } else {
-      write(records).getBytes(encoding)
+      records.asJson.noSpaces.getBytes(encoding)
     }
     val cursorBytes: Array[Byte] = cursors.mkString("\n").getBytes(encoding)
     val dataChan: FileChannel    = new RandomAccessFile(s"${config.outputDir}/part-$part.json.snappy", "rw").getChannel
@@ -180,9 +165,9 @@ class CrossRef(private val config: Config) extends AutoCloseable {
   def close(): Unit = {
     writeHandle.foreach { h =>
       info("Waiting on writes to finish...")
-      h()
-    }
-    client.shutdown()
+      h
+    }.wait()
+    client.close()
   }
 }
 

@@ -2,15 +2,20 @@ package io.crossref
 
 import java.io._
 import java.nio.file._
+
 import scala.collection.JavaConverters._
 import scala.collection.immutable
-import scala.concurrent.Await
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration.Duration
+import scala.concurrent.{Await, Future}
 
-import com.github.plokhotnyuk.jsoniter_scala.core._
-import com.github.plokhotnyuk.jsoniter_scala.macros._
-import dispatch._
+import com.softwaremill.sttp._
+import com.softwaremill.sttp.asynchttpclient.future.AsyncHttpClientFutureBackend
+import com.softwaremill.sttp.circe._
+import io.circe.generic.auto._
+import io.circe.syntax._
+import io.crossref.JsonObjects._
+import org.asynchttpclient.DefaultAsyncHttpClientConfig
 import org.xerial.snappy.SnappyHadoopCompatibleOutputStream
 import scopt._
 import scribe._
@@ -54,22 +59,18 @@ object CR extends App {
 
 object Testing extends App {
 
-  implicit val enc: JsonValueCodec[ItemResponse] = JsonCodecMaker.make[ItemResponse](CodecMakerConfig())
-  val pubEnc: JsonValueCodec[Seq[Publication]]   = JsonCodecMaker.make[Seq[Publication]](CodecMakerConfig())
-  val singlePubEnc: JsonValueCodec[Publication]  = JsonCodecMaker.make[Publication](CodecMakerConfig())
-
   val futures: Seq[Future[Seq[Publication]]] = Seq.empty
-  val base_url: Req                          = url("https://api.crossref.org/works")
-  val wo: WriterConfig                       = WriterConfig(0, false, 32768)
-  val client: Http = Http.withConfiguration { c =>
-    c.setUseNativeTransport(false)
-    c.setCompressionEnforced(true)
-    c.setMaxConnections(500)
-    c.setMaxConnectionsPerHost(200)
-    c.setPooledConnectionIdleTimeout(100)
-    c.setConnectionTtl(100)
-    c.setIoThreadsCount(24)
-  }
+  val base_url                               = uri"https://api.crossref.org/works"
+  val cfg = new DefaultAsyncHttpClientConfig.Builder()
+    .setUseNativeTransport(false)
+    .setCompressionEnforced(true)
+    .setMaxConnections(500)
+    .setMaxConnectionsPerHost(200)
+    .setPooledConnectionIdleTimeout(100)
+    .setConnectionTtl(100)
+    .setIoThreadsCount(24)
+    .build()
+  implicit val client = AsyncHttpClientFutureBackend.usingConfig(cfg)
 
   val base      = "/Users/steve_carman/Desktop"
   val cursorDir = Paths.get(base, "crossref")
@@ -93,16 +94,13 @@ object Testing extends App {
       info(f"Finished: $output (${i + start}/$total) ($pct%3.2f%%)")
   }
 
-  if (!client.client.isClosed) {
-    client.client.close()
-    client.shutdown()
-  }
+  client.close()
 
   @inline
   def writeJson(pubs: Seq[Publication], output: String): Unit = {
     val hos = new SnappyHadoopCompatibleOutputStream(new FileOutputStream(new File(output)))
     pubs.foreach { p =>
-      writeToStream(p, hos, wo)(singlePubEnc)
+      hos.write(p.asJson.noSpaces.getBytes())
       hos.write(Array[Byte]('\n'))
     }
     hos.close()
@@ -111,8 +109,12 @@ object Testing extends App {
   def collectCursors(output: String, cursors: immutable.Seq[String]): Unit = {
     val req = cursors.map { l =>
       Thread.sleep(100)
-      val params = Map("mailto" -> "shcarman%40gmail.com", "rows" -> "1000", "cursor" -> l)
-      client(base_url <<? params OK as.IterJson[ItemResponse]).map(r => r.message.items)
+      val params = uri"$base_url/?mailto=shcarman%40gmail.com&rows=1000&cursor=$l"
+      sttp
+        .get(params)
+        .response(asJson[ItemResponse])
+        .send()
+        .map(r => r.unsafeBody.right.get.message.items)
     }
     val fs     = Future.foldLeft(req)(Seq.empty[Publication])(_ ++ _)
     val result = Await.result(fs, Duration.Inf)

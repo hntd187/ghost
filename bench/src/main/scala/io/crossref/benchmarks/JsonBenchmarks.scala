@@ -13,6 +13,7 @@ import org.json4s.jackson.JsonMethods._
 import org.json4s.jackson.Serialization._
 import org.openjdk.jmh.annotations._
 import org.openjdk.jmh.infra.Blackhole
+import JsonObjects._
 
 object DataSetup {
   @State(Scope.Benchmark)
